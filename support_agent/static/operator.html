@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consolă Operator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>🧑‍💼 Consolă operator</h1>
+  <label class="muted">Token <input id="tok" value="tok_operator" size="12"></label>
+  <a href="/">← Chat client</a>
+</header>
+<nav class="tabs" id="tabs">
+  <button data-t="refunds" class="on">Rambursări</button>
+  <button data-t="handoffs">Escaladări</button>
+  <button data-t="tickets">Tichete</button>
+  <button data-t="audit">Audit log</button>
+  <button data-t="metrics">Metrici</button>
+</nav>
+<main class="op" id="main"></main>
+<script>
+const $ = (s) => document.querySelector(s);
+let tab = new URLSearchParams(location.search).get("tab") || "refunds", openSid = null;
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", Authorization: "Bearer " + $("#tok").value } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const badge = (s) => `<span class="badge ${s}">${s}</span>`;
+
+const views = {
+  async refunds() {
+    const rows = await api("/api/operator/refunds?status=all");
+    return `<p class="muted">Agentul doar <b>creează</b> cereri. Banii pleacă numai după decizia ta. Fiecare decizie intră în audit log.</p>
+    <table><tr><th>#</th><th>Client</th><th>Comandă</th><th>Sumă</th><th>Motiv</th><th>Status</th><th>Acțiune</th></tr>
+    ${rows.map((r) => `<tr><td>${r.id}</td><td>${esc(r.customer_name)}</td><td>${r.order_id}</td><td>${r.amount.toFixed(2)} MDL</td>
+      <td>${esc(r.reason)}</td><td>${badge(r.status)}${r.decided_by ? `<div class="muted">${esc(r.decided_by)} ${esc(r.decision_note || "")}</div>` : ""}</td>
+      <td>${r.status === "pending" ? `<input id="note${r.id}" placeholder="notă" size="10">
+        <button class="ok" onclick="decide(${r.id}, true)">Aprobă</button> <button class="bad" onclick="decide(${r.id}, false)">Respinge</button>` : ""}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">Nicio cerere încă.</td></tr>`}</table>`;
+  },
+  async handoffs() {
+    const rows = await api("/api/operator/handoffs");
+    let html = `<table><tr><th>#</th><th>Client</th><th>Motiv</th><th>Creat</th><th></th></tr>
+    ${rows.map((h) => `<tr><td>${h.id}</td><td>${esc(h.customer_name)}</td><td>${esc(h.reason)}</td><td class="mono">${h.created_at}</td>
+      <td><button class="ghost" onclick="openSession('${h.session_id}')">Deschide</button></td></tr>`).join("")
+      || `<tr><td colspan="5" class="muted">Nicio conversație escaladată.</td></tr>`}</table>`;
+    if (openSid) {
+      const s = await api("/api/operator/sessions/" + openSid);
+      html += `<div class="panel" style="margin-top:16px"><h2>Conversația ${s.id} ${badge(s.state)}</h2>
+        ${s.messages.map((m) => `<div class="msg ${m.role}" style="max-width:100%;margin-bottom:6px"><div class="who">${m.role}</div>${esc(m.content)}</div>`).join("")}
+        <form onsubmit="reply(event)" style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <input id="optext" style="flex:1" placeholder="Răspuns către client…">
+          <button>Trimite</button><button type="button" class="ok" onclick="reply(event, true)">Trimite și închide cazul</button></form></div>`;
+    }
+    return html;
+  },
+  async tickets() {
+    const rows = await api("/api/operator/tickets");
+    return `<table><tr><th>#</th><th>Client</th><th>Comandă</th><th>Categorie</th><th>Prioritate</th><th>Subiect / descriere</th><th>Status</th></tr>
+    ${rows.map((t) => `<tr><td>${t.id}</td><td>${t.customer_id}</td><td>${t.order_id || "—"}</td><td>${t.category}</td><td>${t.priority}</td>
+      <td><b>${esc(t.subject)}</b><div class="muted">${esc(t.description)}</div></td><td>${badge(t.status)}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">Niciun tichet.</td></tr>`}</table>`;
+  },
+  async audit() {
+    const [v, rows] = await Promise.all([api("/api/operator/audit/verify"), api("/api/operator/audit?limit=300")]);
+    return `<p>${v.ok ? `✅ Lanțul de hash-uri e intact (${v.checked} intrări verificate).` : `⚠️ Lanț rupt la intrarea #${v.broken_at_id}!`}</p>
+    <table><tr><th>#</th><th>Timp</th><th>Actor</th><th>Sesiune</th><th>Acțiune</th><th>Detalii</th><th>Hash</th></tr>
+    ${rows.map((r) => `<tr><td>${r.id}</td><td class="mono">${r.ts.slice(11, 19)}</td><td>${esc(r.actor)}</td><td class="mono">${r.session_id || ""}</td>
+      <td><code>${r.action}</code></td><td class="mono">${esc(JSON.stringify(r.details).slice(0, 220))}</td><td class="mono">${r.hash.slice(0, 10)}…</td></tr>`).join("")}</table>`;
+  },
+  async metrics() {
+    const m = await api("/api/operator/metrics");
+    const k = (v, l) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+    return `<div class="kpis">
+      ${k(m.sessions, "conversații")}
+      ${k(m.containment_rate == null ? "—" : Math.round(m.containment_rate * 100) + "%", "rezolvate fără om (containment)")}
+      ${k(m.handoffs, "escaladări la om")}
+      ${k(m.tickets_open, "tichete deschise")}
+      ${k(m.refunds.pending.count, "rambursări în așteptare")}
+      ${k(m.refunds.approved.amount.toFixed(0) + " MDL", "rambursat (aprobat)")}
+      ${k(m.refunds_blocked_by_policy, "rambursări blocate de politică")}
+      ${k(m.guardrail_events, "evenimente guardrail")}
+      ${k("$" + m.llm_cost_usd, `cost LLM (${m.llm_tokens.input}/${m.llm_tokens.output} tokeni)`)}
+    </div>`;
+  },
+};
+async function render() {
+  try { $("#main").innerHTML = await views[tab](); } catch (e) { $("#main").innerHTML = `<p style="color:var(--bad)">Eroare: ${esc(e.message)}</p>`; }
+}
+async function decide(id, approve) {
+  await api(`/api/operator/refunds/${id}/decision`, { method: "POST", body: JSON.stringify({ approve, note: $("#note" + id).value }) }).catch((e) => alert(e.message));
+  render();
+}
+function openSession(sid) { openSid = sid; render(); }
+async function reply(e, resolve = false) {
+  e.preventDefault();
+  await api(`/api/operator/sessions/${openSid}/reply`, { method: "POST", body: JSON.stringify({ text: $("#optext").value, resolve }) });
+  if (resolve) openSid = null;
+  render();
+}
+$("#tabs").onclick = (e) => { const t = e.target.dataset.t; if (!t) return; tab = t;
+  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === t)); render(); };
+document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === tab));
+render(); setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== "INPUT") render(); }, 4000);
+</script>
+</body>
+</html>
